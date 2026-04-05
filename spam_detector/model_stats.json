@@ -1,0 +1,25 @@
+{
+  "accuracy": 98.84,
+  "roc_auc": 99.96,
+  "total_samples": 5171,
+  "spam_count": 1499,
+  "ham_count": 3672,
+  "train_size": 4136,
+  "test_size": 1035,
+  "precision_spam": 96.15,
+  "recall_spam": 100.0,
+  "f1_spam": 98.04,
+  "confusion_matrix": [
+    [
+      723,
+      12
+    ],
+    [
+      0,
+      300
+    ]
+  ],
+  "model": "TF-IDF + Logistic Regression",
+  "features": 10000,
+  "ngrams": "1-2"
+}
