@@ -1,3 +1,6 @@
+# Dataset (large file - source your own or download from UCI)
+spam_ham_dataset.csv
+
 # Python
 __pycache__/
 *.py[cod]
