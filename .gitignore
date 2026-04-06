@@ -26,3 +26,6 @@ spam_detector/spam_model.pkl
 .DS_Store
 Thumbs.db
 *.swp
+
+# Google OAuth client secret
+client_secret_*.json
