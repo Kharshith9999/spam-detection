@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SpamShield AI — Email Spam Detector</title>
+  <meta name="description" content="Free AI-powered spam email detector. Paste any email and instantly find out if it's spam or ham. Runs 100% in your browser."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+  <div class="bg-orb orb-1"></div>
+  <div class="bg-orb orb-2"></div>
+  <div class="bg-orb orb-3"></div>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">🛡️</div>
+      <div class="logo-text">
+        <span class="logo-brand">SpamShield</span>
+        <span class="logo-tag">AI</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="badge badge-loading" id="model-status">⏳ Loading model…</span>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-pill">🤖 Runs 100% in your browser — No server needed</div>
+    <h1 class="hero-title">
+      Is Your Email<br/>
+      <span class="gradient-text">Spam or Ham?</span>
+    </h1>
+    <p class="hero-sub">
+      Paste any email below — our ML model (TF-IDF + Logistic Regression)<br/>
+      gives you an instant verdict, right here in your browser.
+    </p>
+  </section>
+
+  <!-- Model Stats -->
+  <section class="stats-bar" id="stats-bar">
+    <div class="stat-item">
+      <span class="stat-value" id="stat-accuracy">…</span>
+      <span class="stat-label">Accuracy</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-f1">…</span>
+      <span class="stat-label">F1 Score (Spam)</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-total">…</span>
+      <span class="stat-label">Emails Trained On</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-value" id="stat-roc">…</span>
+      <span class="stat-label">ROC-AUC</span>
+    </div>
+  </section>
+
+  <!-- Main checker card -->
+  <main class="main-container">
+    <div class="card detector-card" id="detector-card">
+
+      <div class="card-header">
+        <h2>📧 Paste Your Email</h2>
+        <button class="btn-clear" id="btn-clear">✕ Clear</button>
+      </div>
+
+      <div class="textarea-wrapper">
+        <textarea
+          id="email-input"
+          placeholder="Paste the email subject + body here…
+
+Example:
+Subject: You won $1,000,000! Claim NOW
+Congratulations! You have been SELECTED. Click here immediately to claim your prize money. Act fast before this offer expires!"
+          spellcheck="false"
+        ></textarea>
+        <div class="char-count" id="char-count">0 characters</div>
+      </div>
+
+      <div class="samples-row">
+        <span class="samples-label">Try a sample:</span>
+        <button class="sample-btn" id="sample-spam">🚨 Spam Example</button>
+        <button class="sample-btn" id="sample-ham">✅ Ham Example</button>
+      </div>
+
+      <!-- Loading overlay while model loads -->
+      <div class="model-loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <span>Loading AI model…</span>
+      </div>
+
+      <button class="btn-analyze" id="btn-analyze" disabled>
+        <span class="btn-icon">🔍</span>
+        <span class="btn-text">Check This Email</span>
+        <div class="btn-loader hidden" id="btn-loader"></div>
+      </button>
+
+      <p class="keyboard-hint">Tip: Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to analyze</p>
+    </div>
+
+    <!-- Result card -->
+    <div class="card result-card hidden" id="result-card">
+      <div class="result-header">
+        <div class="result-icon" id="result-icon">❓</div>
+        <div class="result-text">
+          <div class="result-verdict" id="result-verdict">–</div>
+          <div class="result-confidence" id="result-confidence"></div>
+        </div>
+      </div>
+
+      <div class="verdict-banner" id="verdict-banner">
+        <span id="verdict-banner-text"></span>
+      </div>
+
+      <div class="prob-section">
+        <div class="prob-row">
+          <div class="prob-labels">
+            <span class="prob-name spam-color">🚨 Spam probability</span>
+            <span class="prob-pct" id="spam-pct">0%</span>
+          </div>
+          <div class="prob-track"><div class="prob-fill spam-fill" id="spam-bar" style="width:0%"></div></div>
+        </div>
+        <div class="prob-row">
+          <div class="prob-labels">
+            <span class="prob-name ham-color">✅ Ham probability</span>
+            <span class="prob-pct" id="ham-pct">0%</span>
+          </div>
+          <div class="prob-track"><div class="prob-fill ham-fill" id="ham-bar" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <div class="detail-chips" id="detail-chips"></div>
+    </div>
+
+    <!-- History -->
+    <div class="card history-card hidden" id="history-card">
+      <div class="card-header">
+        <h3>🕑 Recent Checks</h3>
+        <button class="btn-clear" id="btn-clear-history">Clear</button>
+      </div>
+      <div class="history-list" id="history-list"></div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>
+      SpamShield AI · TF-IDF + Logistic Regression · Runs entirely in your browser ·
+      <a href="https://github.com/Kharshith9999/spam-detection" target="_blank">View Source on GitHub</a>
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
