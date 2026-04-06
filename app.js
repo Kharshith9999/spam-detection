@@ -1,12 +1,18 @@
 /**
- * SpamShield AI — Browser-side ML Inference
- *
- * Loads the exported TF-IDF + Logistic Regression model (model.json)
- * and runs inference entirely in the browser — no server required.
+ * SpamShield AI — app.js
+ * Browser-side ML inference + Gmail OAuth integration
+ * Client ID: 699683361957-vjfiu37l8kuv10is1ca6742r90b6reek.apps.googleusercontent.com
  */
 
+const CLIENT_ID = "699683361957-vjfiu37l8kuv10is1ca6742r90b6reek.apps.googleusercontent.com";
+const SCOPE     = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email";
+const MAX_EMAILS = 30;
+
 // ── State ──────────────────────────────────────────────────────────────
-let MODEL = null;   // { vocab, idf, coef, intercept, stats }
+let MODEL       = null;
+let tokenClient = null;
+let accessToken = null;
+let allEmailResults = [];
 
 const STOP_WORDS = new Set([
   "a","about","above","after","again","against","all","am","an","and","any","are",
@@ -46,30 +52,43 @@ Hi Sarah,
 
 Thanks for sending over the draft. I've reviewed sections 1 through 3 and left some inline comments in the shared document.
 
-Overall, the structure looks solid. My main suggestion would be to expand the market analysis section with the latest figures from our analytics dashboard. Could you also double-check the revenue projections on page 7? The numbers seem slightly off compared to last quarter's actuals.
+Overall, the structure looks solid. My main suggestion would be to expand the market analysis section with the latest figures from our analytics dashboard. Could you also double-check the revenue projections on page 7?
 
-Let's plan to sync on Thursday at 2 PM to go through the final version before we submit to the board. Does that time work for you?
-
-Looking forward to your thoughts.
+Let's plan to sync on Thursday at 2 PM to go through the final version before we submit. Does that time work for you?
 
 Best regards,
 Michael`
 };
 
 // ── DOM refs ────────────────────────────────────────────────────────────
-const emailInput    = document.getElementById("email-input");
-const charCount     = document.getElementById("char-count");
-const btnAnalyze    = document.getElementById("btn-analyze");
-const btnLoader     = document.getElementById("btn-loader");
-const btnText       = btnAnalyze.querySelector(".btn-text");
-const btnIcon       = btnAnalyze.querySelector(".btn-icon");
-const btnClear      = document.getElementById("btn-clear");
-const btnClearHist  = document.getElementById("btn-clear-history");
-const resultCard    = document.getElementById("result-card");
-const historyCard   = document.getElementById("history-card");
-const historyList   = document.getElementById("history-list");
-const modelStatus   = document.getElementById("model-status");
-const loadingOverlay= document.getElementById("loading-overlay");
+const emailInput      = document.getElementById("email-input");
+const charCount       = document.getElementById("char-count");
+const btnAnalyze      = document.getElementById("btn-analyze");
+const btnLoader       = document.getElementById("btn-loader");
+const btnText         = btnAnalyze.querySelector(".btn-text");
+const btnIcon         = btnAnalyze.querySelector(".btn-icon");
+const btnClear        = document.getElementById("btn-clear");
+const btnClearHist    = document.getElementById("btn-clear-history");
+const resultCard      = document.getElementById("result-card");
+const historyCard     = document.getElementById("history-card");
+const historyList     = document.getElementById("history-list");
+const modelStatus     = document.getElementById("model-status");
+const loadingOverlay  = document.getElementById("loading-overlay");
+
+// Gmail DOM refs
+const btnConnectGmail   = document.getElementById("btn-connect-gmail");
+const gmailConnectCard  = document.getElementById("gmail-connect-card");
+const gmailScanningCard = document.getElementById("gmail-scanning-card");
+const scanningProgress  = document.getElementById("scanning-progress");
+const inboxCard         = document.getElementById("inbox-card");
+const inboxList         = document.getElementById("inbox-list");
+const inboxSummary      = document.getElementById("inbox-summary");
+const gmailUserEl       = document.getElementById("gmail-user");
+const gmailAvatar       = document.getElementById("gmail-avatar");
+const gmailEmailEl      = document.getElementById("gmail-email");
+const btnSignout        = document.getElementById("btn-signout");
+const btnRescan         = document.getElementById("btn-rescan");
+const inboxFilter       = document.getElementById("inbox-filter");
 
 const history = [];
 
@@ -80,19 +99,16 @@ async function loadModel() {
     const res  = await fetch("model.json");
     const data = await res.json();
     MODEL = data;
-
-    // Populate stats bar
     const s = data.stats;
     document.getElementById("stat-accuracy").textContent = s.accuracy  + "%";
     document.getElementById("stat-f1").textContent       = s.f1_spam   + "%";
     document.getElementById("stat-total").textContent    = s.total_samples.toLocaleString();
     document.getElementById("stat-roc").textContent      = s.roc_auc   + "%";
-
-    // Update status badge
-    modelStatus.textContent  = "● Model Ready";
-    modelStatus.className    = "badge badge-ready";
-    btnAnalyze.disabled      = false;
+    modelStatus.textContent = "● Model Ready";
+    modelStatus.className   = "badge badge-ready";
+    btnAnalyze.disabled     = false;
     loadingOverlay.classList.remove("active");
+    initGmailAuth();
   } catch (err) {
     modelStatus.textContent = "⚠ Model failed to load";
     modelStatus.className   = "badge badge-error";
@@ -102,67 +118,39 @@ async function loadModel() {
 }
 loadModel();
 
-// ── TF-IDF + Logistic Regression in JS ─────────────────────────────────
+// ── TF-IDF + Logistic Regression ────────────────────────────────────────
 function tokenize(text) {
-  // Lowercase, keep only alphanumeric
   const words = text.toLowerCase().match(/[a-z0-9]+/g) || [];
   return words.filter(w => w.length > 1 && !STOP_WORDS.has(w));
 }
-
-function buildNgrams(tokens, n) {
-  if (n === 1) return tokens;
+function buildNgrams(tokens) {
   const ngrams = [...tokens];
-  for (let i = 0; i <= tokens.length - n; i++) {
-    ngrams.push(tokens.slice(i, i + n).join(" "));
-  }
+  for (let i = 0; i < tokens.length - 1; i++) ngrams.push(tokens[i] + " " + tokens[i+1]);
   return ngrams;
 }
-
 function predict(text) {
+  if (!MODEL) return null;
   const { vocab, idf, coef, intercept } = MODEL;
-  const numFeatures = idf.length;
-
-  // 1. Tokenize + generate 1-grams and 2-grams
   const tokens = tokenize(text);
-  const terms  = buildNgrams(tokens, 2);  // includes 1-grams + 2-grams
-
-  // 2. Compute raw term frequencies
+  const terms  = buildNgrams(tokens);
   const tf = {};
   for (const t of terms) {
-    if (t in vocab) {
-      tf[t] = (tf[t] || 0) + 1;
-    }
+    if (t in vocab) tf[t] = (tf[t] || 0) + 1;
   }
-
-  // 3. Apply sublinear TF scaling: 1 + log(count)
-  // 4. Multiply by IDF
-  // 5. Build sparse feature vector as Map (index → value)
   const features = {};
   for (const [term, count] of Object.entries(tf)) {
     const idx = vocab[term];
-    const tfVal = 1 + Math.log(count);       // sublinear_tf=True
-    features[idx] = tfVal * idf[idx];
+    features[idx] = (1 + Math.log(count)) * idf[idx];
   }
-
-  // 6. L2 normalize
   let norm = 0;
   for (const v of Object.values(features)) norm += v * v;
   norm = Math.sqrt(norm);
-  if (norm > 0) {
-    for (const k in features) features[k] /= norm;
-  }
-
-  // 7. Dot product with LR coefficients + intercept
+  if (norm > 0) for (const k in features) features[k] /= norm;
   let score = intercept;
-  for (const [idx, val] of Object.entries(features)) {
-    score += val * coef[parseInt(idx, 10)];
-  }
-
-  // 8. Sigmoid → spam probability
+  for (const [idx, val] of Object.entries(features)) score += val * coef[parseInt(idx,10)];
   const spamProb = 1 / (1 + Math.exp(-score));
   const hamProb  = 1 - spamProb;
   const isSpam   = spamProb >= 0.5;
-
   return {
     is_spam:    isSpam,
     label:      isSpam ? "spam" : "ham",
@@ -173,49 +161,225 @@ function predict(text) {
   };
 }
 
-// ── UI: character counter ───────────────────────────────────────────────
+// ── Gmail OAuth ─────────────────────────────────────────────────────────
+function initGmailAuth() {
+  if (!window.google) {
+    setTimeout(initGmailAuth, 500);
+    return;
+  }
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope:     SCOPE,
+    callback:  onTokenReceived,
+  });
+}
+
+function onTokenReceived(resp) {
+  if (resp.error) {
+    console.error("OAuth error:", resp.error);
+    alert("Google sign-in failed: " + resp.error);
+    return;
+  }
+  accessToken = resp.access_token;
+  fetchUserInfo().then(() => scanInbox());
+}
+
+async function fetchUserInfo() {
+  try {
+    const res  = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: "Bearer " + accessToken }
+    });
+    const info = await res.json();
+    gmailAvatar.src      = info.picture || "";
+    gmailEmailEl.textContent = info.email || "";
+    gmailUserEl.classList.remove("hidden");
+  } catch(e) { console.warn("Could not fetch user info", e); }
+}
+
+btnConnectGmail.addEventListener("click", () => {
+  if (!tokenClient) { alert("Auth not ready yet, please wait a moment."); return; }
+  tokenClient.requestAccessToken({ prompt: "consent" });
+});
+
+btnSignout.addEventListener("click", () => {
+  if (accessToken) google.accounts.oauth2.revoke(accessToken, () => {});
+  accessToken = null;
+  allEmailResults = [];
+  gmailUserEl.classList.add("hidden");
+  gmailConnectCard.classList.remove("hidden");
+  gmailScanningCard.classList.add("hidden");
+  inboxCard.classList.add("hidden");
+});
+
+btnRescan.addEventListener("click", () => {
+  if (!accessToken) return;
+  scanInbox();
+});
+
+// ── Gmail API ───────────────────────────────────────────────────────────
+async function gmailGet(path) {
+  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/" + path, {
+    headers: { Authorization: "Bearer " + accessToken }
+  });
+  if (!res.ok) throw new Error("Gmail API error: " + res.status);
+  return res.json();
+}
+
+function decodeBase64(str) {
+  try {
+    return decodeURIComponent(escape(atob(str.replace(/-/g,"+").replace(/_/g,"/"))));
+  } catch { return ""; }
+}
+
+function extractBody(payload) {
+  if (!payload) return "";
+  // Direct body
+  if (payload.body && payload.body.data) return decodeBase64(payload.body.data);
+  // Multipart: prefer text/plain
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      if (part.mimeType === "text/plain" && part.body && part.body.data)
+        return decodeBase64(part.body.data);
+    }
+    // Fall back to any part
+    for (const part of payload.parts) {
+      const txt = extractBody(part);
+      if (txt) return txt;
+    }
+  }
+  return "";
+}
+
+function getHeader(headers, name) {
+  const h = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : "";
+}
+
+function formatDate(internalDate) {
+  try {
+    const d = new Date(parseInt(internalDate));
+    return d.toLocaleDateString("en-US", { month:"short", day:"numeric" });
+  } catch { return ""; }
+}
+
+async function scanInbox() {
+  gmailConnectCard.classList.add("hidden");
+  gmailScanningCard.classList.remove("hidden");
+  inboxCard.classList.add("hidden");
+  scanningProgress.textContent = "Fetching email list…";
+
+  try {
+    // 1. Get list of message IDs
+    const listData = await gmailGet(`messages?maxResults=${MAX_EMAILS}&labelIds=INBOX`);
+    const messages = listData.messages || [];
+
+    if (!messages.length) {
+      scanningProgress.textContent = "No emails found in inbox.";
+      return;
+    }
+
+    // 2. Fetch each message
+    allEmailResults = [];
+    for (let i = 0; i < messages.length; i++) {
+      scanningProgress.textContent = `Scanning email ${i+1} of ${messages.length}…`;
+      try {
+        const msg  = await gmailGet(`messages/${messages[i].id}?format=full`);
+        const hdrs = msg.payload.headers;
+        const from    = getHeader(hdrs, "From");
+        const subject = getHeader(hdrs, "Subject") || "(no subject)";
+        const date    = formatDate(msg.internalDate);
+        const body    = extractBody(msg.payload);
+        const content = `Subject: ${subject}\n${body}`.trim();
+        const result  = predict(content) || { is_spam:false, label:"ham", spam_prob:0, ham_prob:100, confidence:100 };
+        allEmailResults.push({ from, subject, date, body: body.substring(0,400), result });
+      } catch(e) {
+        console.warn("Skipping message", messages[i].id, e);
+      }
+    }
+
+    // 3. Show results
+    gmailScanningCard.classList.add("hidden");
+    renderInbox("all");
+    inboxCard.classList.remove("hidden");
+
+  } catch (err) {
+    gmailScanningCard.classList.add("hidden");
+    gmailConnectCard.classList.remove("hidden");
+    console.error("Gmail scan failed:", err);
+    alert("Failed to read Gmail: " + err.message + "\n\nMake sure you granted permission.");
+  }
+}
+
+// ── Render Inbox ─────────────────────────────────────────────────────────
+function renderInbox(filter) {
+  const emails  = filter === "spam" ? allEmailResults.filter(e => e.result.is_spam)
+                : filter === "ham"  ? allEmailResults.filter(e => !e.result.is_spam)
+                : allEmailResults;
+
+  const spamCount = allEmailResults.filter(e => e.result.is_spam).length;
+  const hamCount  = allEmailResults.length - spamCount;
+
+  inboxSummary.innerHTML =
+    `Scanned <strong>${allEmailResults.length}</strong> emails — ` +
+    `<span class="spam-count">🚨 ${spamCount} spam</span> · ` +
+    `<span class="ham-count">✅ ${hamCount} ham</span>`;
+
+  inboxList.innerHTML = emails.map((e, i) => {
+    const label = e.result.is_spam ? "spam" : "ham";
+    const conf  = e.result.confidence.toFixed(0);
+    return `
+      <div class="email-row ${label}-row" onclick="toggleDetail(${i})" id="email-row-${i}">
+        <span class="email-verdict-badge ${label}">${label === "spam" ? "🚨" : "✅"} ${label}</span>
+        <div class="email-info">
+          <div class="email-from">${esc(e.from)}</div>
+          <div class="email-subject">${esc(e.subject)}</div>
+        </div>
+        <span class="email-conf">${conf}%</span>
+        <span class="email-date">${esc(e.date)}</span>
+      </div>
+      <div class="email-detail" id="email-detail-${i}">
+        <strong>Spam:</strong> ${e.result.spam_prob.toFixed(1)}%  |  <strong>Ham:</strong> ${e.result.ham_prob.toFixed(1)}%
+        <br/><br/>${esc(e.body || "(no body)")}
+      </div>`;
+  }).join("");
+
+  if (!emails.length) {
+    inboxList.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-muted)">No emails match this filter.</div>`;
+  }
+}
+
+window.toggleDetail = function(i) {
+  const detail = document.getElementById("email-detail-" + i);
+  if (detail) detail.classList.toggle("open");
+};
+
+inboxFilter.addEventListener("change", () => renderInbox(inboxFilter.value));
+
+// ── Manual checker ──────────────────────────────────────────────────────
 emailInput.addEventListener("input", () => {
   const n = emailInput.value.length;
-  charCount.textContent = n.toLocaleString() + " character" + (n !== 1 ? "s" : "");
+  charCount.textContent = n.toLocaleString() + " character" + (n!==1?"s":"");
 });
-
-// ── UI: sample buttons ──────────────────────────────────────────────────
 document.getElementById("sample-spam").addEventListener("click", () => {
-  emailInput.value = SAMPLES.spam;
-  emailInput.dispatchEvent(new Event("input"));
-  emailInput.focus();
+  emailInput.value = SAMPLES.spam; emailInput.dispatchEvent(new Event("input")); emailInput.focus();
 });
 document.getElementById("sample-ham").addEventListener("click", () => {
-  emailInput.value = SAMPLES.ham;
-  emailInput.dispatchEvent(new Event("input"));
-  emailInput.focus();
+  emailInput.value = SAMPLES.ham; emailInput.dispatchEvent(new Event("input")); emailInput.focus();
 });
-
-// ── UI: clear ──────────────────────────────────────────────────────────
 btnClear.addEventListener("click", () => {
-  emailInput.value = "";
-  emailInput.dispatchEvent(new Event("input"));
-  resultCard.classList.add("hidden");
-  emailInput.focus();
+  emailInput.value = ""; emailInput.dispatchEvent(new Event("input"));
+  resultCard.classList.add("hidden"); emailInput.focus();
 });
 btnClearHist.addEventListener("click", () => {
-  history.length = 0;
-  historyList.innerHTML = "";
-  historyCard.classList.add("hidden");
+  history.length = 0; historyList.innerHTML = ""; historyCard.classList.add("hidden");
 });
-
-// ── UI: analyze ────────────────────────────────────────────────────────
 btnAnalyze.addEventListener("click", analyze);
-emailInput.addEventListener("keydown", e => {
-  if (e.ctrlKey && e.key === "Enter") analyze();
-});
+emailInput.addEventListener("keydown", e => { if(e.ctrlKey && e.key==="Enter") analyze(); });
 
 function analyze() {
-  if (!MODEL) { alert("Model is still loading, please wait…"); return; }
+  if (!MODEL) { alert("Model is still loading…"); return; }
   const text = emailInput.value.trim();
   if (!text) { shake(emailInput); return; }
-
-  // brief loading flash
   setLoading(true);
   setTimeout(() => {
     const result = predict(text);
@@ -225,32 +389,22 @@ function analyze() {
   }, 120);
 }
 
-// ── Show result ─────────────────────────────────────────────────────────
 function showResult(data, text) {
   const isSpam = data.is_spam;
-
-  resultCard.classList.remove("hidden", "spam-result", "ham-result");
+  resultCard.classList.remove("hidden","spam-result","ham-result");
   resultCard.classList.add(isSpam ? "spam-result" : "ham-result");
-
   document.getElementById("result-icon").textContent  = isSpam ? "🚨" : "✅";
   const verdictEl = document.getElementById("result-verdict");
   verdictEl.textContent = isSpam ? "SPAM Detected!" : "HAM (Legitimate)";
   verdictEl.className   = "result-verdict " + (isSpam ? "spam-verdict" : "ham-verdict");
-  document.getElementById("result-confidence").textContent =
-    `Confidence: ${data.confidence.toFixed(1)}%`;
-
-  // Verdict banner
+  document.getElementById("result-confidence").textContent = `Confidence: ${data.confidence.toFixed(1)}%`;
   const banner = document.getElementById("verdict-banner");
-  const bannerText = document.getElementById("verdict-banner-text");
+  document.getElementById("verdict-banner-text").textContent = isSpam
+    ? "⚠️ Warning: This email shows strong spam signals. Do not click any links or share personal info."
+    : "✅ This email appears to be legitimate and does not show common spam patterns.";
   banner.className = "verdict-banner " + (isSpam ? "spam-banner" : "ham-banner");
-  bannerText.textContent = isSpam
-    ? "⚠️  Warning: This email shows strong spam signals. Do not click any links or provide personal information."
-    : "✅  This email appears to be legitimate. It does not show common spam patterns.";
-
-  // Bars
-  ["spam-pct","ham-pct"].forEach((id,i) => {
-    document.getElementById(id).textContent = [data.spam_prob, data.ham_prob][i].toFixed(1) + "%";
-  });
+  document.getElementById("spam-pct").textContent = data.spam_prob.toFixed(1) + "%";
+  document.getElementById("ham-pct").textContent  = data.ham_prob.toFixed(1)  + "%";
   const spamBar = document.getElementById("spam-bar");
   const hamBar  = document.getElementById("ham-bar");
   spamBar.style.width = "0%"; hamBar.style.width = "0%";
@@ -258,53 +412,42 @@ function showResult(data, text) {
     spamBar.style.width = data.spam_prob + "%";
     hamBar.style.width  = data.ham_prob  + "%";
   }, 50));
-
-  // Chips
   document.getElementById("detail-chips").innerHTML = `
-    <div class="chip"><span>📊</span> ${isSpam ? "Spam" : "Ham"}: ${data.confidence.toFixed(1)}%</div>
+    <div class="chip"><span>${isSpam?"⛔":"🔒"}</span> ${isSpam?"High Risk":"Safe"}</div>
+    <div class="chip"><span>📊</span> ${isSpam?"Spam":"Ham"}: ${data.confidence.toFixed(1)}%</div>
     <div class="chip"><span>📝</span> ${data.word_count} words</div>
-    <div class="chip"><span>🧠</span> TF-IDF + LR</div>
-    <div class="chip"><span>${isSpam ? "⛔" : "🔒"}</span> ${isSpam ? "High Risk" : "Safe"}</div>
-  `;
-
-  resultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    <div class="chip"><span>🧠</span> TF-IDF + LR</div>`;
+  resultCard.scrollIntoView({ behavior:"smooth", block:"nearest" });
 }
 
-// ── History ─────────────────────────────────────────────────────────────
 function addToHistory(data, text) {
   history.unshift({ data, text });
   historyCard.classList.remove("hidden");
-  historyList.innerHTML = history.slice(0, 8).map((entry, i) => {
-    const preview = entry.text.replace(/\s+/g, " ").substring(0, 80) + "…";
-    const label   = entry.data.is_spam ? "spam" : "ham";
-    const conf    = entry.data.confidence.toFixed(1);
+  historyList.innerHTML = history.slice(0,8).map((e,i) => {
+    const preview = e.text.replace(/\s+/g," ").substring(0,80)+"…";
+    const label   = e.data.is_spam ? "spam" : "ham";
     return `<div class="history-item">
       <span class="history-badge ${label}">${label}</span>
-      <span class="history-text" title="${esc(entry.text)}">${esc(preview)}</span>
-      <span class="history-conf">${conf}%</span>
+      <span class="history-text">${esc(preview)}</span>
+      <span class="history-conf">${e.data.confidence.toFixed(1)}%</span>
     </div>`;
   }).join("");
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
 function setLoading(on) {
   btnAnalyze.disabled      = on || !MODEL;
   btnLoader.classList.toggle("hidden", !on);
   btnIcon.style.visibility = on ? "hidden" : "visible";
   btnText.textContent      = on ? "Analyzing…" : "Check This Email";
 }
-
 function shake(el) {
   el.style.animation = "none"; el.offsetHeight;
   el.style.animation = "shake 0.4s ease";
-  el.addEventListener("animationend", () => { el.style.animation = ""; }, { once: true });
+  el.addEventListener("animationend", () => { el.style.animation=""; }, { once:true });
 }
-
 function esc(s) {
-  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
-
-// inject shake keyframe
 const kf = document.createElement("style");
-kf.textContent = `@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}}`;
+kf.textContent=`@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}}`;
 document.head.appendChild(kf);
